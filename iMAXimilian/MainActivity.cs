@@ -1,19 +1,11 @@
-using Android.App;
-using Android.Content;
+﻿using Android.Content;
 using Android.Graphics;
-using Android.OS;
-using Android.Runtime;
 using Android.Views;
 using Android.Webkit;
-using Android.Widget;
 using AndroidX.AppCompat.App;
-using Java.Lang;
-using System;
-using System.IO;
-using System.Net.Http;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
 using Java.Interop;
+using System.Text.RegularExpressions;
+using Android.Views;
 
 [Activity(Label = "WebMaxApp", MainLauncher = true,
           Theme = "@style/Theme.AppCompat.DayNight.NoActionBar",
@@ -40,6 +32,10 @@ public class MainActivity : AppCompatActivity
     private string? pendingFilename;
     private string? pendingDownloadUrl;
 
+    private int leftPanelWidth = 0;
+
+    public bool IsLeftPanelWidthKnown => leftPanelWidth > 0;
+
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
@@ -57,6 +53,7 @@ public class MainActivity : AppCompatActivity
             LayoutParameters = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent,
                 ViewGroup.LayoutParams.MatchParent)
+            { Gravity = GravityFlags.Right }
         };
 
         var webClient = new MyWebViewClient(this, webView);
@@ -69,6 +66,8 @@ public class MainActivity : AppCompatActivity
 
         ConfigureWebView(webClient);
         webView.LoadUrl(SiteUrl);
+
+        TryLoadLeftPanelWidth();
     }
 
     private void ConfigureWebView(WebViewClient webClient)
@@ -85,7 +84,7 @@ public class MainActivity : AppCompatActivity
 
         webSettings.SetAppCacheEnabled(true);
         webSettings.SetAppCachePath(CacheDir.AbsolutePath);
-        webSettings.SetAppCacheMaxSize(10 * 1024 * 1024);
+        webSettings.SetAppCacheMaxSize(20 * 1024 * 1024);
         webSettings.CacheMode = CacheModes.Default;
 
         var cookieManager = CookieManager.Instance;
@@ -100,6 +99,31 @@ public class MainActivity : AppCompatActivity
 
         // Handle downloads (including blob: links)
         webView.SetDownloadListener(new CustomDownloadListener(this, webView));
+
+        SetupSwipeGestures();
+    }
+
+    private void SetupSwipeGestures()
+    {
+        var gestureDetector = new GestureDetector(this, new SwipeGestureListener
+        {
+            OnSwipeRight = () =>
+            {
+                ChangeLeftPanelVisibility(true);
+            },
+            OnSwipeLeft = () =>
+            {
+                ChangeLeftPanelVisibility(false);
+            }
+        });
+
+        webView.SetOnTouchListener(new WebViewTouchListener(gestureDetector));
+    }
+
+    private void ChangeLeftPanelVisibility(bool visible)
+    {
+        int addedWidth = visible ? 0 : leftPanelWidth;
+        webView.LayoutParameters.Width = Resources.DisplayMetrics.WidthPixels + addedWidth;
     }
 
     private void SetupGlobalLayoutListener()
@@ -161,6 +185,31 @@ public class MainActivity : AppCompatActivity
         var resources = Resources;
         int resourceId = resources.GetIdentifier(name, "dimen", "android");
         return resourceId > 0 ? resources.GetDimensionPixelSize(resourceId) : fallback;
+    }
+
+    private void TryLoadLeftPanelWidth()
+    {
+        var prefs = GetSharedPreferences("app_prefs", FileCreationMode.Private);
+        if (prefs.Contains("left_panel_width"))
+        {
+            leftPanelWidth = prefs.GetInt("left_panel_width", 0);
+            if (webView != null)
+            {
+                webView.LayoutParameters.Width = Resources.DisplayMetrics.WidthPixels + leftPanelWidth;
+            }
+        }
+    }
+
+    public void OnLeftPanelWidthCalculated(int width)
+    {
+        var prefs = GetSharedPreferences("app_prefs", FileCreationMode.Private);
+        var editor = prefs.Edit();
+
+        editor.PutInt("left_panel_width", width);
+        leftPanelWidth = width;
+        webView.LayoutParameters.Width = Resources.DisplayMetrics.WidthPixels + leftPanelWidth;
+
+        editor.Apply();
     }
 
     protected override void OnDestroy()
@@ -226,7 +275,7 @@ public class MainActivity : AppCompatActivity
             {
                 if (data == null)
                 {
-                    // ������/������ ���������� ������ ���������� null � ���������� ������ ������
+                    // Камера/другие приложения иногда возвращают null — возвращаем пустой массив
                     result = Array.Empty<Android.Net.Uri>();
                 }
                 else if (data.ClipData != null)
@@ -326,6 +375,64 @@ public class MainActivity : AppCompatActivity
         public void OnGlobalLayout() => action?.Invoke();
     }
 
+    public class SwipeGestureListener : GestureDetector.SimpleOnGestureListener
+    {
+        private const int SWIPE_THRESHOLD = 100;        // минимальное расстояние свайпа по X
+        private const int SWIPE_VELOCITY_THRESHOLD = 100; // минимальная скорость
+
+        // Действие на свайп вправо
+        public Action OnSwipeRight { get; set; }
+
+        // Новое действие на свайп влево
+        public Action OnSwipeLeft { get; set; }
+
+        public override bool OnFling(MotionEvent e1, MotionEvent e2, float velocityX, float velocityY)
+        {
+            if (e1 == null || e2 == null)
+                return false;
+
+            float diffX = e2.GetX() - e1.GetX();
+            float diffY = e2.GetY() - e1.GetY();
+
+            // проверяем горизонтальный свайп
+            if (Math.Abs(diffX) > Math.Abs(diffY))
+            {
+                // свайп вправо
+                if (diffX > SWIPE_THRESHOLD && Math.Abs(velocityX) > SWIPE_VELOCITY_THRESHOLD)
+                {
+                    OnSwipeRight?.Invoke(); // вызываем действие свайпа вправо
+                    return true;
+                }
+
+                // свайп влево
+                if (diffX < -SWIPE_THRESHOLD && Math.Abs(velocityX) > SWIPE_VELOCITY_THRESHOLD)
+                {
+                    OnSwipeLeft?.Invoke(); // вызываем действие свайпа влево
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    public class WebViewTouchListener : Java.Lang.Object, View.IOnTouchListener
+    {
+        private readonly GestureDetector _gestureDetector;
+
+        public WebViewTouchListener(GestureDetector gestureDetector)
+        {
+            _gestureDetector = gestureDetector;
+        }
+
+        public bool OnTouch(View v, MotionEvent e)
+        {
+            _gestureDetector.OnTouchEvent(e);
+            return false; // false, чтобы WebView продолжал обрабатывать скролл
+        }
+    }
+
+
     public class MyWebViewClient : WebViewClient
     {
         private readonly Activity activity;
@@ -343,10 +450,196 @@ public class MainActivity : AppCompatActivity
             base.OnPageStarted(view, url, favicon);
         }
 
+        int cnt = 0;
+
         public override void OnPageFinished(WebView view, string url)
         {
+            cnt++;
             base.OnPageFinished(view, url);
+
+            if (cnt != 3) // Я глубоко извиняюсь за такой подход, но сайт судя по всему делает либо 2 редиректа, либо динамически подгружает контент
+                return;
+
+            if (((MainActivity)activity).IsLeftPanelWidthKnown)
+                return;
+
+            view.Post(async () =>
+        {
+            try
+            {
+                await Task.Delay(5000);
+
+                string html = await GetPageHtmlAsync(view);
+                if (!html.Contains("<h2 class=\"title svelte-pu1tym\">Чаты</h2>")) // это не основная страница с левым меню
+                    return;
+
+                // принудительно временно выключаем hardware layer, чтобы Draw() рисовал содержимое
+                view.SetLayerType(LayerType.Software, null);
+
+                var bitmap = Bitmap.CreateBitmap(view.Width, view.Height, Bitmap.Config.Argb8888);
+                var canvas = new Canvas(bitmap);
+                view.Draw(canvas);
+
+                // восстановим аппаратный рендер (или LayerType.None)
+                view.SetLayerType(LayerType.Hardware, null);
+
+                ((MainActivity)activity).OnLeftPanelWidthCalculated(GetLeftPannelWidth(bitmap));
+
+                //InjectBitmapToPage(view, bitmap);
+            }
+            catch (System.Exception ex)
+            {
+                Android.Util.Log.Error("WebViewBitmap", ex.ToString());
+            }
+        });
         }
+
+        private Task<string> GetPageHtmlAsync(WebView webView)
+        {
+            var tcs = new TaskCompletionSource<string>();
+
+            webView.EvaluateJavascript(
+                "(function() { return document.documentElement.outerHTML; })();",
+                new IValueCallbackImplementation(tcs)
+            );
+
+            return tcs.Task;
+        }
+
+        // Реализация IValueCallback для C#
+        class IValueCallbackImplementation : Java.Lang.Object, IValueCallback
+        {
+            private readonly TaskCompletionSource<string> _tcs;
+
+            public IValueCallbackImplementation(TaskCompletionSource<string> tcs)
+            {
+                _tcs = tcs;
+            }
+
+            public void OnReceiveValue(Java.Lang.Object value)
+            {
+                string result = value?.ToString() ?? string.Empty;
+
+                // Убираем экранирование JSON-строки
+                result = result.Trim('"')
+                               .Replace("\\u003C", "<")
+                               .Replace("\\n", "\n")
+                               .Replace("\\\"", "\"");
+
+                _tcs.TrySetResult(result);
+            }
+        }
+
+
+        private int GetLeftPannelWidth(Bitmap bitmap)
+        {
+            int y = bitmap.Height / 2;
+            var FirstPixel = bitmap.GetPixel(1, y);
+            for (int x = 1; x < bitmap.Width; x++)
+            {
+                if (bitmap.GetPixel(x, y) != FirstPixel)
+                {
+                    return x;
+                }
+            }
+
+            return 0;
+        }
+
+        private void InjectBitmapToPage(WebView view, Bitmap bitmap, int maxThumbWidth = 600)
+        {
+            if (view == null || bitmap == null) return;
+
+            // Создаём thumbnail, чтобы base64 не был гигантским
+            int thumbW = System.Math.Min(bitmap.Width, maxThumbWidth);
+            int thumbH = (int)(bitmap.Height * (thumbW / (double)System.Math.Max(1, bitmap.Width)));
+            Bitmap thumb = Bitmap.CreateScaledBitmap(bitmap, thumbW, thumbH, true);
+
+            // Кодируем thumbnail в PNG -> base64
+            string base64;
+            using (var ms = new MemoryStream())
+            {
+                thumb.Compress(Bitmap.CompressFormat.Png, 100, ms);
+                base64 = Convert.ToBase64String(ms.ToArray());
+            }
+
+            // Освобождаем thumbnail, если он не тот же объект
+            if (!thumb.Equals(bitmap))
+            {
+                try { thumb.Recycle(); } catch { /* ignore */ }
+            }
+
+            // Экранируем апострофы и переносы строк — чтобы безопасно вставить в JS-строку
+            var esc = base64.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\r", "").Replace("\n", "");
+
+            // JS: вставляет <div id="android_screenshot_preview"> с картинкой и кнопкой закрытия
+            var js = $@"(function(){{
+        try {{
+            var id = 'android_screenshot_preview';
+            var existing = document.getElementById(id);
+            if(existing) existing.parentNode.removeChild(existing);
+
+            var wrapper = document.createElement('div');
+            wrapper.id = id;
+            wrapper.style.position = 'fixed';
+            wrapper.style.bottom = '12px';
+            wrapper.style.right = '12px';
+            wrapper.style.zIndex = '2147483647';
+            wrapper.style.boxShadow = '0 4px 18px rgba(0,0,0,0.35)';
+            wrapper.style.borderRadius = '8px';
+            wrapper.style.overflow = 'hidden';
+            wrapper.style.background = '#fff';
+            wrapper.style.maxWidth = '40vw';
+            wrapper.style.maxHeight = '60vh';
+            wrapper.style.display = 'flex';
+            wrapper.style.flexDirection = 'column';
+            wrapper.style.alignItems = 'flex-end';
+
+            var ctrl = document.createElement('div');
+            ctrl.style.width = '100%';
+            ctrl.style.display = 'flex';
+            ctrl.style.justifyContent = 'flex-end';
+            ctrl.style.padding = '4px';
+
+            var close = document.createElement('button');
+            close.textContent = '✕';
+            close.style.border = 'none';
+            close.style.background = 'transparent';
+            close.style.fontSize = '16px';
+            close.style.cursor = 'pointer';
+            close.onclick = function(){{ if(wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper); }};
+
+            ctrl.appendChild(close);
+
+            var img = document.createElement('img');
+            img.src = 'data:image/png;base64,{esc}';
+            img.style.display = 'block';
+            img.style.width = '100%';
+            img.style.height = 'auto';
+            img.style.objectFit = 'contain';
+            img.style.borderTop = '1px solid #e6e6e6';
+
+            wrapper.appendChild(ctrl);
+            wrapper.appendChild(img);
+            document.body.appendChild(wrapper);
+        }} catch(e) {{ console && console.log('inject error', e); }}
+    }})();";
+
+            // Выполняем JS в UI-потоке
+            view.Post(() =>
+            {
+                try
+                {
+                    view.EvaluateJavascript(js, null);
+                }
+                catch (System.Exception ex)
+                {
+                    Android.Util.Log.Error("InjectBitmap", ex.ToString());
+                }
+            });
+        } //оставлю это здесь на случай изменения дизайна сайта
+
+
     }
 
     public class MyWebChromeClient : WebChromeClient
@@ -395,7 +688,7 @@ public class MainActivity : AppCompatActivity
 
             if (url != null && url.StartsWith("blob:", StringComparison.OrdinalIgnoreCase))
             {
-                // For blob: � fetch via JS and pass base64 to Android
+                // For blob: — fetch via JS and pass base64 to Android
                 var escUrl = EscapeForJs(url);
                 var escName = EscapeForJs(filename);
                 var escMime = EscapeForJs(mimeType ?? "");
@@ -465,7 +758,7 @@ try {{
         private static string GetExtensionFromMime(string mime)
         {
             if (string.IsNullOrEmpty(mime)) return "";
-            // very small mapping � expand if needed
+            // very small mapping — expand if needed
             if (mime.Contains("pdf")) return ".pdf";
             if (mime.Contains("zip")) return ".zip";
             if (mime.Contains("json")) return ".json";
